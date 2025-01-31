@@ -35,3 +35,21 @@
    - Ensures MariaDB is restarted after configuration changes and SSL updates.
 
 This version is a complete solution for secure, optimized, and automated MariaDB hosting with SSL support. 🚀
+
+**Save and Run the Script**
+```bash
+chmod +x install_secure_mariadb_alerts.sh
+./install_secure_mariadb_alerts.sh
+```
+**Test Backup Alerts**
+```bash
+rm -rf /var/backups/mysql/mysql_backup_$(date +%F).sql.gz
+/etc/cron.daily/mysql_backup
+```
+You should receive an email alert if the backup fails.
+**Test MySQL Health Alerts**
+```bash
+/etc/cron.hourly/mysql_health_check
+```
+Check your email for alerts if MySQL load is high.
+
