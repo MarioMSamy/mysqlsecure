@@ -86,12 +86,23 @@ get_input DB_NAME "Enter the name of the WooCommerce database" no "$DEFAULT_DB_N
 get_input DB_USER "Enter the username for the WooCommerce database" no "$DEFAULT_DB_USER"
 get_input DB_PASSWORD "Enter a strong password for the WooCommerce database user" yes "$DEFAULT_DB_PASSWORD"
 
+# Gather multiple IP addresses for remote access
+WEB_SERVER_IPS=()
 while true; do
-    get_input WEB_SERVER_IP "Enter the IP address of your web server (e.g., 192.168.1.100)" no "127.0.0.1"
-    if validate_ip "$WEB_SERVER_IP"; then
+    read -p "Enter an IP address for remote access (or leave blank to finish): " ip
+    if [[ -z "$ip" ]]; then
         break
     fi
+    if validate_ip "$ip"; then
+        WEB_SERVER_IPS+=("$ip")
+    fi
 done
+
+# Check if at least one IP was provided
+if [[ ${#WEB_SERVER_IPS[@]} -eq 0 ]]; then
+    echo "No IP addresses provided. Exiting."
+    exit 1
+fi
 
 get_input BACKUP_DIR "Enter the directory for MariaDB backups" no "$DEFAULT_BACKUP_DIR"
 
@@ -161,10 +172,12 @@ mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'
 mysql -u root -p"${DB_ROOT_PASSWORD}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';" || { echo "Failed to grant privileges. Exiting."; exit 1; }
 mysql -u root -p"${DB_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
 
-# Allow remote access only from the specified web server IP
-echo "Allowing remote access only from ${WEB_SERVER_IP}..."
-mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'${WEB_SERVER_IP}' IDENTIFIED BY '${DB_PASSWORD}';" || { echo "Failed to create remote database user. Exiting."; exit 1; }
-mysql -u root -p"${DB_ROOT_PASSWORD}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'${WEB_SERVER_IP}';" || { echo "Failed to grant remote privileges. Exiting."; exit 1; }
+# Allow remote access from each specified IP address
+for ip in "${WEB_SERVER_IPS[@]}"; do
+    echo "Allowing remote access from ${ip}..."
+    mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'${ip}' IDENTIFIED BY '${DB_PASSWORD}';" || { echo "Failed to create remote database user for ${ip}. Exiting."; exit 1; }
+    mysql -u root -p"${DB_ROOT_PASSWORD}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'${ip}';" || { echo "Failed to grant remote privileges for ${ip}. Exiting."; exit 1; }
+done
 mysql -u root -p"${DB_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
 
 # Configure MariaDB to bind to a specific IP (e.g., the server's private IP)
@@ -198,16 +211,14 @@ if ! systemctl restart mariadb; then
     exit 1
 fi
 
-# Configure the firewall to allow MariaDB traffic only from the specified web server IP
-echo "Configuring firewall to allow MariaDB traffic from ${WEB_SERVER_IP}..."
-if ! ufw status | grep -q "Status: active"; then
-    echo "UFW is not active. Enabling UFW..."
-    ufw --force enable
-fi
-if ! ufw allow from "$WEB_SERVER_IP" to any port 3306; then
-    echo "Failed to configure the firewall. Exiting."
-    exit 1
-fi
+# Configure the firewall to allow MariaDB traffic from each specified IP address
+for ip in "${WEB_SERVER_IPS[@]}"; do
+    echo "Configuring firewall to allow MariaDB traffic from ${ip}..."
+    if ! ufw allow from "$ip" to any port 3306; then
+        echo "Failed to configure the firewall for ${ip}. Exiting."
+        exit 1
+    fi
+done
 
 # Set up automated backups for the WooCommerce database
 echo "Setting up automated backups..."
@@ -247,7 +258,10 @@ chmod 700 "$TUNER_SCRIPT"
 echo "MariaDB setup for WooCommerce is complete! 🚀"
 echo "Optimized based on server resources: ${TOTAL_RAM_KB} KB RAM, ${CPU_CORES} CPU cores."
 echo "WooCommerce database '${DB_NAME}' and user '${DB_USER}' have been created."
-echo "Remote access is allowed only from ${WEB_SERVER_IP}."
+echo "Remote access is allowed from the following IP addresses:"
+for ip in "${WEB_SERVER_IPS[@]}"; do
+    echo "  - ${ip}"
+done
 echo "Automated backups are scheduled daily at 2 AM."
 echo "Weekly monitoring via mysqltuner is set up."
 echo "Please check the log file at $LOG_FILE for any errors or warnings."
