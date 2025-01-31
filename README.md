@@ -36,16 +36,39 @@
 
 This version is a complete solution for secure, optimized, and automated MariaDB hosting with SSL support. 🚀
 
-**Save and Run the Script**
+To download and use the script on your server, follow these steps:
+
+### **1. Download the Script**
+Run the following command on your server to download the script using `wget`:
+```bash
+wget -O install_secure_mariadb_alerts.sh https://raw.githubusercontent.com/MarioMSamy/mysqlsecure/refs/heads/main/install_secure_mariadb_alerts.sh
+```
+This will save the script as `install_secure_mariadb_alerts.sh` in your current directory.
+
+### **2. Make the Script Executable**
+After downloading, give the script execution permissions:
 ```bash
 chmod +x install_secure_mariadb_alerts.sh
+```
+
+### **3. Run the Script**
+Execute the script to install and configure the secure MariaDB setup:
+```bash
 ./install_secure_mariadb_alerts.sh
 ```
+
+### **4. (Optional) Run as Root**
+If the script requires root privileges, run it with:
+```bash
+sudo ./install_secure_mariadb_alerts.sh
+```
+
 **Test Backup Alerts**
 ```bash
 rm -rf /var/backups/mysql/mysql_backup_$(date +%F).sql.gz
 /etc/cron.daily/mysql_backup
 ```
+
 You should receive an email alert if the backup fails.
 **Test MySQL Health Alerts**
 ```bash
