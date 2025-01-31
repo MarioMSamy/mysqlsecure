@@ -8,13 +8,13 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # Log File
-LOG_FILE="/var/log/mysql_woocommerce_setup.log"
+LOG_FILE="/var/log/mariadb_woocommerce_setup.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 chmod 600 "$LOG_FILE"
 
 # Welcome Message
-echo "Welcome to the WooCommerce MySQL Setup Script!"
-echo "This script will configure MySQL with security, performance optimizations, automated backups, and monitoring."
+echo "Welcome to the WooCommerce MariaDB Setup Script!"
+echo "This script will configure MariaDB with security, performance optimizations, automated backups, and monitoring."
 echo "Please provide the required information to proceed (or leave blank to generate random values)."
 
 # Function to generate random strings
@@ -71,7 +71,7 @@ DEFAULT_DB_NAME="woocommerce_$(generate_random_string 8)"
 DEFAULT_DB_USER="user_$(generate_random_string 6)"
 DEFAULT_DB_PASSWORD=$(generate_random_string 16)
 DEFAULT_DB_ROOT_PASSWORD=$(generate_random_string 24)
-DEFAULT_BACKUP_DIR="/var/backups/mysql"
+DEFAULT_BACKUP_DIR="/var/backups/mariadb"
 
 # Gather required input from the user
 while true; do
@@ -81,7 +81,7 @@ while true; do
     fi
 done
 
-get_input DB_ROOT_PASSWORD "Enter a strong password for the MySQL root user" yes "$DEFAULT_DB_ROOT_PASSWORD"
+get_input DB_ROOT_PASSWORD "Enter a strong password for the MariaDB root user" yes "$DEFAULT_DB_ROOT_PASSWORD"
 get_input DB_NAME "Enter the name of the WooCommerce database" no "$DEFAULT_DB_NAME"
 get_input DB_USER "Enter the username for the WooCommerce database" no "$DEFAULT_DB_USER"
 get_input DB_PASSWORD "Enter a strong password for the WooCommerce database user" yes "$DEFAULT_DB_PASSWORD"
@@ -93,22 +93,22 @@ while true; do
     fi
 done
 
-get_input BACKUP_DIR "Enter the directory for MySQL backups" no "$DEFAULT_BACKUP_DIR"
+get_input BACKUP_DIR "Enter the directory for MariaDB backups" no "$DEFAULT_BACKUP_DIR"
 
 # Determine Server Resources
 TOTAL_RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo || true)
 CPU_CORES=$(nproc || true)
 
-# Configure MySQL performance settings based on available RAM
+# Configure MariaDB performance settings based on available RAM
 INNODB_BUFFER_POOL_SIZE=$(($TOTAL_RAM_KB * 70 / 100 / 1024))M
-MAX_CONNECTIONS="1000"
+MAX_CONNECTIONS="500"
 
 # Validate and create the backup directory if it doesn't exist
 if [[ ! -d "$BACKUP_DIR" ]]; then
     echo "Creating backup directory: $BACKUP_DIR"
     mkdir -p "$BACKUP_DIR" || { echo "Failed to create backup directory. Exiting."; exit 1; }
     chmod 700 "$BACKUP_DIR" || { echo "Failed to set permissions for backup directory. Exiting."; exit 1; }
-    chown root:root "$BACKUP_DIR" || { echo "Failed to set ownership for backup directory. Exiting."; exit 1; }
+    chown mysql:mysql "$BACKUP_DIR" || { echo "Failed to set ownership for backup directory. Exiting."; exit 1; }
 fi
 
 # Fix broken packages
@@ -125,7 +125,7 @@ if ! apt-get install -y curl; then
     exit 1
 fi
 
-# Add Percona repository
+# Add Percona repository (for percona-xtrabackup)
 echo "Adding Percona repository..."
 wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb
 dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
@@ -140,30 +140,41 @@ fi
 
 # Install required packages
 echo "Installing required packages..."
-if ! apt-get install -y mysql-server mysql-client sendmail mailutils mysqltuner cron gzip ufw percona-xtrabackup-80; then
+if ! apt-get install -y mariadb-server mariadb-client sendmail mailutils mysqltuner cron gzip ufw percona-xtrabackup-80; then
     echo "Failed to install required packages. Exiting."
     exit 1
 fi
 
-# Secure MySQL installation
-echo "Securing MySQL..."
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASSWORD}';" || { echo "Failed to set MySQL root password. Exiting."; exit 1; }
-mysql -e "DELETE FROM mysql.user WHERE User='';" || { echo "Failed to delete anonymous users. Exiting."; exit 1; }
-mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" || { echo "Failed to secure root user. Exiting."; exit 1; }
-mysql -e "DROP DATABASE IF EXISTS test;" || { echo "Failed to drop test database. Exiting."; exit 1; }
-mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';" || { echo "Failed to remove test database privileges. Exiting."; exit 1; }
-mysql -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
+# Secure MariaDB installation
+echo "Securing MariaDB..."
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}';" || { echo "Failed to set MariaDB root password. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "DELETE FROM mysql.user WHERE User='';" || { echo "Failed to delete anonymous users. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" || { echo "Failed to secure root user. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "DROP DATABASE IF EXISTS test;" || { echo "Failed to drop test database. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';" || { echo "Failed to remove test database privileges. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
 
 # Create the WooCommerce database and user
 echo "Creating WooCommerce database and user..."
-mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;" || { echo "Failed to create database. Exiting."; exit 1; }
-mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" || { echo "Failed to create database user. Exiting."; exit 1; }
-mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';" || { echo "Failed to grant privileges. Exiting."; exit 1; }
-mysql -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;" || { echo "Failed to create database. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" || { echo "Failed to create database user. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';" || { echo "Failed to grant privileges. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
 
-# Configure MySQL performance settings
-echo "Configuring MySQL for optimal performance..."
-cat > /etc/mysql/conf.d/99-woocommerce-optimized.cnf <<EOF
+# Allow remote access only from the specified web server IP
+echo "Allowing remote access only from ${WEB_SERVER_IP}..."
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'${WEB_SERVER_IP}' IDENTIFIED BY '${DB_PASSWORD}';" || { echo "Failed to create remote database user. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'${WEB_SERVER_IP}';" || { echo "Failed to grant remote privileges. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
+
+# Configure MariaDB to bind to a specific IP (e.g., the server's private IP)
+echo "Configuring MariaDB to bind to a specific IP..."
+PRIVATE_IP=$(hostname -I | awk '{print $1}')
+sed -i "s/^bind-address.*/bind-address = ${PRIVATE_IP}/" /etc/mysql/mariadb.conf.d/50-server.cnf || { echo "Failed to update bind-address. Exiting."; exit 1; }
+
+# Configure MariaDB performance settings
+echo "Configuring MariaDB for optimal performance..."
+cat > /etc/mysql/mariadb.conf.d/99-woocommerce-optimized.cnf <<EOF
 [mysqld]
 innodb_buffer_pool_size = $INNODB_BUFFER_POOL_SIZE
 max_connections = $MAX_CONNECTIONS
@@ -177,18 +188,18 @@ long_query_time = 2
 log_bin = /var/log/mysql/mysql-bin.log
 expire_logs_days = 7
 EOF
-chmod 640 /etc/mysql/conf.d/99-woocommerce-optimized.cnf
-chown root:root /etc/mysql/conf.d/99-woocommerce-optimized.cnf
+chmod 640 /etc/mysql/mariadb.conf.d/99-woocommerce-optimized.cnf
+chown mysql:mysql /etc/mysql/mariadb.conf.d/99-woocommerce-optimized.cnf
 
-# Restart MySQL to apply changes
-echo "Restarting MySQL..."
-if ! systemctl restart mysql; then
-    echo "Failed to restart MySQL. Exiting."
+# Restart MariaDB to apply changes
+echo "Restarting MariaDB..."
+if ! systemctl restart mariadb; then
+    echo "Failed to restart MariaDB. Exiting."
     exit 1
 fi
 
-# Configure the firewall to allow MySQL traffic only from the specified web server IP
-echo "Configuring firewall to allow MySQL traffic from web server..."
+# Configure the firewall to allow MariaDB traffic only from the specified web server IP
+echo "Configuring firewall to allow MariaDB traffic from ${WEB_SERVER_IP}..."
 if ! ufw status | grep -q "Status: active"; then
     echo "UFW is not active. Enabling UFW..."
     ufw --force enable
@@ -200,7 +211,7 @@ fi
 
 # Set up automated backups for the WooCommerce database
 echo "Setting up automated backups..."
-BACKUP_SCRIPT="/usr/local/bin/mysql_backup.sh"
+BACKUP_SCRIPT="/usr/local/bin/mariadb_backup.sh"
 cat > "$BACKUP_SCRIPT" <<EOF
 #!/bin/bash
 TIMESTAMP=\$(date +%F)
@@ -216,26 +227,27 @@ chmod 700 "$BACKUP_SCRIPT"
 
 # Create a cron job for daily backup at 2 AM
 echo "Creating cron job for daily backup..."
-echo "0 2 * * * root $BACKUP_SCRIPT" > /etc/cron.d/mysql_backup
-chmod 600 /etc/cron.d/mysql_backup
+echo "0 2 * * * root $BACKUP_SCRIPT" > /etc/cron.d/mariadb_backup
+chmod 600 /etc/cron.d/mariadb_backup
 
 # Set up weekly monitoring using mysqltuner
 echo "Setting up weekly monitoring with mysqltuner..."
-TUNER_SCRIPT="/etc/cron.weekly/mysql_tuner"
+TUNER_SCRIPT="/etc/cron.weekly/mariadb_tuner"
 cat > "$TUNER_SCRIPT" <<EOF
 #!/bin/bash
-/usr/bin/mysqltuner --silent | mail -s "MySQL Tuner Report" "$ALERT_EMAIL"
+/usr/bin/mysqltuner --silent | mail -s "MariaDB Tuner Report" "$ALERT_EMAIL"
 if [ \$? -ne 0 ]; then
-    echo "Failed to send MySQL Tuner report." >&2
+    echo "Failed to send MariaDB Tuner report." >&2
     exit 1
 fi
 EOF
 chmod 700 "$TUNER_SCRIPT"
 
 # Final Summary
-echo "MySQL setup for WooCommerce is complete! 🚀"
+echo "MariaDB setup for WooCommerce is complete! 🚀"
 echo "Optimized based on server resources: ${TOTAL_RAM_KB} KB RAM, ${CPU_CORES} CPU cores."
 echo "WooCommerce database '${DB_NAME}' and user '${DB_USER}' have been created."
+echo "Remote access is allowed only from ${WEB_SERVER_IP}."
 echo "Automated backups are scheduled daily at 2 AM."
 echo "Weekly monitoring via mysqltuner is set up."
 echo "Please check the log file at $LOG_FILE for any errors or warnings."
@@ -243,4 +255,4 @@ echo "Generated values:"
 echo "  - Database Name: ${DB_NAME}"
 echo "  - Database User: ${DB_USER}"
 echo "  - Database Password: ${DB_PASSWORD}"
-echo "  - MySQL Root Password: ${DB_ROOT_PASSWORD}"
+echo "  - MariaDB Root Password: ${DB_ROOT_PASSWORD}"
