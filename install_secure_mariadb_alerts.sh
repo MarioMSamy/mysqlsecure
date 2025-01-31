@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Exit on error
+set -e
+
 # Log File
 LOG_FILE="/var/log/mariadb_setup.log"
 exec > >(tee -a $LOG_FILE) 2>&1
@@ -16,28 +19,34 @@ get_input() {
     local is_password=$3
     while [[ -z "${!var_name}" ]]; do
         if [[ "$is_password" == "yes" ]]; then
-            read -s -p "$prompt_message" $var_name
+            read -s -p "$prompt_message: " input
             echo
         else
-            read -p "$prompt_message" $var_name
+            read -p "$prompt_message: " input
+        fi
+        if [[ -n "$input" ]]; then
+            eval "$var_name='$input'"
+        else
+            echo "Input cannot be empty. Please try again."
         fi
     done
 }
 
 # Gather required input from user
-get_input ALERT_EMAIL "Enter your email address for alerts and SSL setup: " no
-get_input DOMAIN "Enter your domain name (e.g., example.com): " no
-get_input DB_ROOT_PASSWORD "Enter a strong password for the MariaDB root user: " yes
-get_input DB_NAME "Enter the name of the WordPress database: " no
-get_input DB_USER "Enter the username for the WordPress database: " no
-get_input DB_PASSWORD "Enter a strong password for the WordPress database user: " yes
-get_input WEB_SERVER_IP "Enter the IP address of your web server (e.g., 192.168.1.100): " no
-get_input BACKUP_DIR "Enter the directory for MySQL backups (e.g., /var/backups/mysql): " no
+get_input ALERT_EMAIL "Enter your email address for alerts and SSL setup" no
+get_input DOMAIN "Enter your domain name (e.g., example.com)" no
+get_input DB_ROOT_PASSWORD "Enter a strong password for the MariaDB root user" yes
+get_input DB_NAME "Enter the name of the WordPress database" no
+get_input DB_USER "Enter the username for the WordPress database" no
+get_input DB_PASSWORD "Enter a strong password for the WordPress database user" yes
+get_input WEB_SERVER_IP "Enter the IP address of your web server (e.g., 192.168.1.100)" no
+get_input BACKUP_DIR "Enter the directory for MySQL backups (e.g., /var/backups/mysql)" no
 
 # Validate and create backup directory
 if [[ ! -d "$BACKUP_DIR" ]]; then
     echo "Creating backup directory: $BACKUP_DIR"
     mkdir -p "$BACKUP_DIR" || { echo "Failed to create backup directory. Exiting."; exit 1; }
+    chmod 700 "$BACKUP_DIR" || { echo "Failed to set permissions for backup directory. Exiting."; exit 1; }
 fi
 
 # Install required packages
@@ -89,7 +98,11 @@ cat > $CRON_JOB <<EOF
 #!/bin/bash
 certbot renew --quiet && systemctl restart mariadb
 EOF
-chmod +x $CRON_JOB
+chmod +x $CRON_JOB || { echo "Failed to set execute permissions on cron job. Exiting."; exit 1; }
+
+# Configure Firewall
+echo "Configuring firewall to allow MySQL traffic from web server..."
+ufw allow from "$WEB_SERVER_IP" to any port 3306 || { echo "Failed to configure firewall. Exiting."; exit 1; }
 
 # Summary
 echo "MariaDB setup is complete! 🚀"
