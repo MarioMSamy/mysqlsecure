@@ -20,7 +20,7 @@ echo "Please provide the required information to proceed (or leave blank to gene
 # Function to generate random strings
 generate_random_string() {
     local length=$1
-    tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c "$length"
+    tr -dc 'a-zA-Z0-9' < /dev/urandom 2>/dev/null | head -c "$length" || true
 }
 
 # Function to prompt for user input safely
@@ -96,8 +96,8 @@ done
 get_input BACKUP_DIR "Enter the directory for MySQL backups" no "$DEFAULT_BACKUP_DIR"
 
 # Determine Server Resources
-TOTAL_RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-CPU_CORES=$(nproc)
+TOTAL_RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo || true)
+CPU_CORES=$(nproc || true)
 
 # Configure MySQL performance settings based on available RAM
 INNODB_BUFFER_POOL_SIZE=$(($TOTAL_RAM_KB * 70 / 100 / 1024))M
@@ -108,31 +108,58 @@ if [[ ! -d "$BACKUP_DIR" ]]; then
     echo "Creating backup directory: $BACKUP_DIR"
     mkdir -p "$BACKUP_DIR" || { echo "Failed to create backup directory. Exiting."; exit 1; }
     chmod 700 "$BACKUP_DIR" || { echo "Failed to set permissions for backup directory. Exiting."; exit 1; }
-    chown mysql:mysql "$BACKUP_DIR" || { echo "Failed to set ownership for backup directory. Exiting."; exit 1; }
+    chown root:root "$BACKUP_DIR" || { echo "Failed to set ownership for backup directory. Exiting."; exit 1; }
+fi
+
+# Fix broken packages
+echo "Fixing broken packages..."
+if ! apt --fix-broken install -y; then
+    echo "Failed to fix broken packages. Exiting."
+    exit 1
+fi
+
+# Install curl (required for Percona repository setup)
+echo "Installing curl..."
+if ! apt-get install -y curl; then
+    echo "Failed to install curl. Exiting."
+    exit 1
+fi
+
+# Add Percona repository
+echo "Adding Percona repository..."
+wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb
+dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
+percona-release enable tools release
+apt-get update
+
+# Remove postfix if it is installed (to resolve MTA conflict)
+if dpkg -l | grep -q '^ii.*postfix'; then
+    echo "Removing postfix to resolve MTA conflict..."
+    apt-get remove --purge -y postfix
 fi
 
 # Install required packages
 echo "Installing required packages..."
-if ! apt update || ! apt install -y mysql-server mysql-client sendmail mailutils mysqltuner cron gzip ufw percona-xtrabackup-24; then
+if ! apt-get install -y mysql-server mysql-client sendmail mailutils mysqltuner cron gzip ufw percona-xtrabackup-80; then
     echo "Failed to install required packages. Exiting."
     exit 1
 fi
 
 # Secure MySQL installation
 echo "Securing MySQL..."
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASSWORD}';"
-mysql -e "DELETE FROM mysql.user WHERE User='';"
-mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
-mysql -e "DROP DATABASE IF EXISTS test;"
-mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
-mysql -e "FLUSH PRIVILEGES;"
+mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASSWORD}';" || { echo "Failed to set MySQL root password. Exiting."; exit 1; }
+mysql -e "DELETE FROM mysql.user WHERE User='';" || { echo "Failed to delete anonymous users. Exiting."; exit 1; }
+mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" || { echo "Failed to secure root user. Exiting."; exit 1; }
+mysql -e "DROP DATABASE IF EXISTS test;" || { echo "Failed to drop test database. Exiting."; exit 1; }
+mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';" || { echo "Failed to remove test database privileges. Exiting."; exit 1; }
+mysql -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
 
 # Create the WooCommerce database and user
 echo "Creating WooCommerce database and user..."
-mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
-mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';"
-mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
-mysql -e "FLUSH PRIVILEGES;"
+mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;" || { echo "Failed to create database. Exiting."; exit 1; }
+mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';" || { echo "Failed to create database user. Exiting."; exit 1; }
+mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';" || { echo "Failed to grant privileges. Exiting."; exit 1; }
+mysql -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
 
 # Configure MySQL performance settings
 echo "Configuring MySQL for optimal performance..."
@@ -151,7 +178,7 @@ log_bin = /var/log/mysql/mysql-bin.log
 expire_logs_days = 7
 EOF
 chmod 640 /etc/mysql/conf.d/99-woocommerce-optimized.cnf
-chown root:mysql /etc/mysql/conf.d/99-woocommerce-optimized.cnf
+chown root:root /etc/mysql/conf.d/99-woocommerce-optimized.cnf
 
 # Restart MySQL to apply changes
 echo "Restarting MySQL..."
