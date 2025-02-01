@@ -9,8 +9,23 @@ fi
 
 # Log File
 LOG_FILE="/var/log/mariadb_woocommerce_setup.log"
-exec > >(tee -a "$LOG_FILE") 2>&1
+
+# Create the log file and set permissions
+touch "$LOG_FILE"
 chmod 600 "$LOG_FILE"
+
+# Redirect all output to the log file
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+# Function to set owner based on existence of mysql user
+set_owner() {
+    local target="$1"
+    if id "mysql" &>/dev/null; then
+        chown mysql:mysql "$target"
+    else
+        chown root:root "$target"
+    fi
+}
 
 # Welcome Message
 echo "Welcome to the WooCommerce MariaDB Setup Script!"
@@ -86,25 +101,40 @@ get_input DB_NAME "Enter the name of the WooCommerce database" no "$DEFAULT_DB_N
 get_input DB_USER "Enter the username for the WooCommerce database" no "$DEFAULT_DB_USER"
 get_input DB_PASSWORD "Enter a strong password for the WooCommerce database user" yes "$DEFAULT_DB_PASSWORD"
 
-# Gather multiple IP addresses for remote access
-WEB_SERVER_IPS=()
-while true; do
-    read -p "Enter an IP address for remote access (or leave blank to finish): " ip
-    if [[ -z "$ip" ]]; then
-        break
-    fi
-    if validate_ip "$ip"; then
-        WEB_SERVER_IPS+=("$ip")
-    fi
-done
-
-# Check if at least one IP was provided
-if [[ ${#WEB_SERVER_IPS[@]} -eq 0 ]]; then
-    echo "No IP addresses provided. Exiting."
+# Gather a single IP address for remote access
+read -p "Enter the IP address for remote access: " REMOTE_IP
+if [[ -z "$REMOTE_IP" ]]; then
+    echo "No IP address provided. Exiting."
+    exit 1
+fi
+if ! validate_ip "$REMOTE_IP"; then
+    echo "Invalid IP address provided. Exiting."
     exit 1
 fi
 
 get_input BACKUP_DIR "Enter the directory for MariaDB backups" no "$DEFAULT_BACKUP_DIR"
+
+# Ask if the user wants to enable Google Drive upload
+read -p "Do you want to enable auto-upload of backups to Google Drive? (yes/no) [default: no]: " ENABLE_GDRIVE_UPLOAD
+ENABLE_GDRIVE_UPLOAD=${ENABLE_GDRIVE_UPLOAD:-no}
+
+if [[ "$ENABLE_GDRIVE_UPLOAD" == "yes" ]]; then
+    echo "Google Drive upload will be enabled."
+    # Install rclone if not already installed
+    if ! command -v rclone &> /dev/null; then
+        echo "Installing rclone..."
+        # Ensure curl is installed
+        if ! command -v curl &> /dev/null; then
+            echo "Installing curl..."
+            apt-get update && apt-get install -y curl
+        fi
+        curl https://rclone.org/install.sh | sudo bash
+    fi
+
+    # Configure rclone for Google Drive
+    echo "Please configure rclone for Google Drive:"
+    rclone config
+fi
 
 # Determine Server Resources
 TOTAL_RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo || true)
@@ -119,7 +149,7 @@ if [[ ! -d "$BACKUP_DIR" ]]; then
     echo "Creating backup directory: $BACKUP_DIR"
     mkdir -p "$BACKUP_DIR" || { echo "Failed to create backup directory. Exiting."; exit 1; }
     chmod 700 "$BACKUP_DIR" || { echo "Failed to set permissions for backup directory. Exiting."; exit 1; }
-    chown mysql:mysql "$BACKUP_DIR" || { echo "Failed to set ownership for backup directory. Exiting."; exit 1; }
+    set_owner "$BACKUP_DIR" || { echo "Failed to set ownership for backup directory. Exiting."; exit 1; }
 fi
 
 # Fix broken packages
@@ -172,12 +202,10 @@ mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'
 mysql -u root -p"${DB_ROOT_PASSWORD}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';" || { echo "Failed to grant privileges. Exiting."; exit 1; }
 mysql -u root -p"${DB_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
 
-# Allow remote access from each specified IP address
-for ip in "${WEB_SERVER_IPS[@]}"; do
-    echo "Allowing remote access from ${ip}..."
-    mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'${ip}' IDENTIFIED BY '${DB_PASSWORD}';" || { echo "Failed to create remote database user for ${ip}. Exiting."; exit 1; }
-    mysql -u root -p"${DB_ROOT_PASSWORD}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'${ip}';" || { echo "Failed to grant remote privileges for ${ip}. Exiting."; exit 1; }
-done
+# Allow remote access from the specified IP address
+echo "Allowing remote access from ${REMOTE_IP}..."
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'${REMOTE_IP}' IDENTIFIED BY '${DB_PASSWORD}';" || { echo "Failed to create remote database user for ${REMOTE_IP}. Exiting."; exit 1; }
+mysql -u root -p"${DB_ROOT_PASSWORD}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'${REMOTE_IP}';" || { echo "Failed to grant remote privileges for ${REMOTE_IP}. Exiting."; exit 1; }
 mysql -u root -p"${DB_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;" || { echo "Failed to flush privileges. Exiting."; exit 1; }
 
 # Configure MariaDB to bind to a specific IP (e.g., the server's private IP)
@@ -202,7 +230,11 @@ log_bin = /var/log/mysql/mysql-bin.log
 expire_logs_days = 7
 EOF
 chmod 640 /etc/mysql/mariadb.conf.d/99-woocommerce-optimized.cnf
-chown mysql:mysql /etc/mysql/mariadb.conf.d/99-woocommerce-optimized.cnf
+set_owner /etc/mysql/mariadb.conf.d/99-woocommerce-optimized.cnf || { echo "Failed to set ownership for optimized config. Exiting."; exit 1; }
+
+# Create MySQL log directory if it doesn't exist
+mkdir -p /var/log/mysql
+set_owner /var/log/mysql || { echo "Failed to set ownership for MySQL log directory. Exiting."; exit 1; }
 
 # Restart MariaDB to apply changes
 echo "Restarting MariaDB..."
@@ -211,14 +243,12 @@ if ! systemctl restart mariadb; then
     exit 1
 fi
 
-# Configure the firewall to allow MariaDB traffic from each specified IP address
-for ip in "${WEB_SERVER_IPS[@]}"; do
-    echo "Configuring firewall to allow MariaDB traffic from ${ip}..."
-    if ! ufw allow from "$ip" to any port 3306; then
-        echo "Failed to configure the firewall for ${ip}. Exiting."
-        exit 1
-    fi
-done
+# Configure the firewall to allow MariaDB traffic from the specified IP address
+echo "Configuring firewall to allow MariaDB traffic from ${REMOTE_IP}..."
+if ! ufw allow from "$REMOTE_IP" to any port 3306; then
+    echo "Failed to configure the firewall for ${REMOTE_IP}. Exiting."
+    exit 1
+fi
 
 # Set up automated backups for the WooCommerce database
 echo "Setting up automated backups..."
@@ -226,9 +256,19 @@ BACKUP_SCRIPT="/usr/local/bin/mariadb_backup.sh"
 cat > "$BACKUP_SCRIPT" <<EOF
 #!/bin/bash
 TIMESTAMP=\$(date +%F)
-mysqldump -u root -p'${DB_ROOT_PASSWORD}' ${DB_NAME} | gzip > "${BACKUP_DIR}/${DB_NAME}_backup_\${TIMESTAMP}.sql.gz"
+BACKUP_FILE="${BACKUP_DIR}/${DB_NAME}_backup_\${TIMESTAMP}.sql.gz"
+mysqldump -u root -p'${DB_ROOT_PASSWORD}' ${DB_NAME} | gzip > "\${BACKUP_FILE}"
 if [ \$? -eq 0 ]; then
-    echo "Backup successful: ${BACKUP_DIR}/${DB_NAME}_backup_\${TIMESTAMP}.sql.gz"
+    echo "Backup successful: \${BACKUP_FILE}"
+    if [[ "$ENABLE_GDRIVE_UPLOAD" == "yes" ]]; then
+        echo "Uploading backup to Google Drive..."
+        rclone copy "\${BACKUP_FILE}" remote:backups/
+        if [ \$? -eq 0 ]; then
+            echo "Upload to Google Drive successful."
+        else
+            echo "Upload to Google Drive failed." >&2
+        fi
+    fi
 else
     echo "Backup failed" >&2
     exit 1
@@ -258,11 +298,11 @@ chmod 700 "$TUNER_SCRIPT"
 echo "MariaDB setup for WooCommerce is complete! 🚀"
 echo "Optimized based on server resources: ${TOTAL_RAM_KB} KB RAM, ${CPU_CORES} CPU cores."
 echo "WooCommerce database '${DB_NAME}' and user '${DB_USER}' have been created."
-echo "Remote access is allowed from the following IP addresses:"
-for ip in "${WEB_SERVER_IPS[@]}"; do
-    echo "  - ${ip}"
-done
+echo "Remote access is allowed from: ${REMOTE_IP}"
 echo "Automated backups are scheduled daily at 2 AM."
+if [[ "$ENABLE_GDRIVE_UPLOAD" == "yes" ]]; then
+    echo "Backups will be uploaded to Google Drive."
+fi
 echo "Weekly monitoring via mysqltuner is set up."
 echo "Please check the log file at $LOG_FILE for any errors or warnings."
 echo "Generated values:"
